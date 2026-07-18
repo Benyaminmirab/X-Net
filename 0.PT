@@ -1,0 +1,69 @@
+import os
+import torch
+import numpy as np
+from PIL import Image
+from tqdm import tqdm
+
+images_folder = r'G:\دانشگاه\paper-shenasayii -olgo\paper\polyp\CVC-ClinicDB-352\image'
+masks_folder = r'G:\دانشگاه\paper-shenasayii -olgo\paper\polyp\CVC-ClinicDB-352\mask'
+
+output_images_pt = r'C:\colon\cvc-clinik\images.pt'
+output_masks_pt = r'C:\colon\cvc-clinik\masks.pt'
+
+TARGET_SIZE = (256, 256)
+
+def get_valid_image_names(folder):
+    valid_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    return sorted(
+        f for f in os.listdir(folder)
+        if os.path.splitext(f)[1].lower() in valid_extensions
+    )
+
+def preprocess_image(image_path):
+    image = Image.open(image_path).convert("RGB")
+    image = image.resize(TARGET_SIZE, Image.BILINEAR)
+    image = np.array(image, dtype=np.float32) / 255.0
+    image = image.transpose(2, 0, 1)  # HWC -> CHW
+    return torch.tensor(image, dtype=torch.float32)
+
+def preprocess_mask(mask_path):
+    mask = Image.open(mask_path).convert("L")
+    mask = mask.resize(TARGET_SIZE, Image.NEAREST)
+    mask = np.array(mask, dtype=np.uint8)
+    mask = (mask > 128).astype(np.uint8)
+    return torch.tensor(mask, dtype=torch.long)
+
+def build_pt_files(images_folder, masks_folder, output_images_pt, output_masks_pt):
+    image_names = get_valid_image_names(images_folder)
+
+    all_images = []
+    all_masks = []
+
+    print(f"Processing dataset... {len(image_names)} samples")
+
+    for image_name in tqdm(image_names):
+        image_path = os.path.join(images_folder, image_name)
+        mask_path = os.path.join(masks_folder, image_name)
+
+        if not os.path.exists(mask_path):
+            print(f"Mask not found for: {image_name}")
+            continue
+
+        image_tensor = preprocess_image(image_path)
+        mask_tensor = preprocess_mask(mask_path)
+
+        all_images.append(image_tensor)
+        all_masks.append(mask_tensor)
+
+    images_tensor = torch.stack(all_images)  # (N, 3, 256, 256)
+    masks_tensor = torch.stack(all_masks)    # (N, 256, 256)
+
+    torch.save(images_tensor, output_images_pt)
+    torch.save(masks_tensor, output_masks_pt)
+
+    print(f"Images saved to: {output_images_pt}")
+    print(f"Masks saved to:  {output_masks_pt}")
+    print(f"Images shape: {images_tensor.shape}")
+    print(f"Masks shape:  {masks_tensor.shape}")
+
+build_pt_files(images_folder, masks_folder, output_images_pt, output_masks_pt)
