@@ -1,0 +1,188 @@
+import matplotlib.pyplot as plt
+from PIL import Image, ImageEnhance
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+
+
+class SegmentationDataset(Dataset):
+    def __init__(self, images_pt, masks_pt, indices, augmentation=True):
+        self.images = torch.load(images_pt).float()
+        self.masks = torch.load(masks_pt).long()
+        self.indices = indices
+        self.augmentation = augmentation
+
+        if len(self.images) != len(self.masks):
+            raise ValueError("The number of images and masks must be the same.")
+
+    def __len__(self):
+        return len(self.indices)
+
+    def random_rotation(self, image, mask, angle_range=(-25, 25)):
+        angle = random.uniform(*angle_range)
+
+        image_pil = Image.fromarray((image * 255).astype(np.uint8))
+        mask_pil = Image.fromarray(mask.astype(np.uint8))
+
+        rotated_image = image_pil.rotate(angle, resample=Image.BILINEAR)
+        rotated_mask = mask_pil.rotate(angle, resample=Image.NEAREST)
+
+        return np.array(rotated_image, dtype=np.float32) / 255.0, np.array(rotated_mask, dtype=np.uint8)
+
+    def random_rescale(self, image, mask, scale_range=(0.9, 1.1)):
+        scale_factor = random.uniform(*scale_range)
+        h, w = image.shape[:2]
+        new_h, new_w = int(h * scale_factor), int(w * scale_factor)
+
+        image_pil = Image.fromarray((image * 255).astype(np.uint8))
+        mask_pil = Image.fromarray(mask.astype(np.uint8))
+
+        resized_image = image_pil.resize((new_w, new_h), resample=Image.BILINEAR)
+        resized_mask = mask_pil.resize((new_w, new_h), resample=Image.NEAREST)
+
+        image = np.array(resized_image, dtype=np.float32) / 255.0
+        mask = np.array(resized_mask, dtype=np.uint8)
+
+        if scale_factor > 1.0:
+            top = (new_h - h) // 2
+            left = (new_w - w) // 2
+            image = image[top:top + h, left:left + w]
+            mask = mask[top:top + h, left:left + w]
+        else:
+            pad_h = (h - new_h) // 2
+            pad_w = (w - new_w) // 2
+            image = np.pad(
+                image,
+                ((pad_h, h - new_h - pad_h), (pad_w, w - new_w - pad_w), (0, 0)),
+                mode='constant'
+            )
+            mask = np.pad(
+                mask,
+                ((pad_h, h - new_h - pad_h), (pad_w, w - new_w - pad_w)),
+                mode='constant'
+            )
+
+        return image, mask
+
+    def random_shear(self, image, mask, shear_range=(-25, 25)):
+        shear_angle = random.uniform(*shear_range)
+        transform_matrix = (1, np.tan(np.radians(shear_angle)), 0, 0, 1, 0)
+
+        image_pil = Image.fromarray((image * 255).astype(np.uint8))
+        mask_pil = Image.fromarray(mask.astype(np.uint8))
+
+        sheared_image = image_pil.transform(
+            image_pil.size,
+            Image.AFFINE,
+            transform_matrix,
+            resample=Image.BILINEAR
+        )
+        sheared_mask = mask_pil.transform(
+            mask_pil.size,
+            Image.AFFINE,
+            transform_matrix,
+            resample=Image.NEAREST
+        )
+
+        return np.array(sheared_image, dtype=np.float32) / 255.0, np.array(sheared_mask, dtype=np.uint8)
+
+    def random_color_jitter(self, image, brightness=0.2, contrast=0.2, saturation=0.2):
+        enhancer = ImageEnhance.Brightness(Image.fromarray((image * 255).astype(np.uint8)))
+        image = np.array(
+            enhancer.enhance(random.uniform(1 - brightness, 1 + brightness)),
+            dtype=np.float32
+        ) / 255.0
+
+        enhancer = ImageEnhance.Contrast(Image.fromarray((image * 255).astype(np.uint8)))
+        image = np.array(
+            enhancer.enhance(random.uniform(1 - contrast, 1 + contrast)),
+            dtype=np.float32
+        ) / 255.0
+
+        enhancer = ImageEnhance.Color(Image.fromarray((image * 255).astype(np.uint8)))
+        image = np.array(
+            enhancer.enhance(random.uniform(1 - saturation, 1 + saturation)),
+            dtype=np.float32
+        ) / 255.0
+
+        return image
+
+    def preprocess_mask(self, mask):
+        return (mask > 0).astype(np.uint8)
+
+    def to_tensor(self, image, mask):
+        image = torch.tensor(image.copy().transpose(2, 0, 1), dtype=torch.float32)
+        mask = torch.tensor(mask.copy(), dtype=torch.long)
+        return image, mask
+
+    def __getitem__(self, idx):
+        real_idx = self.indices[idx]
+
+        image = self.images[real_idx].permute(1, 2, 0).cpu().numpy().astype(np.float32)
+        mask = self.masks[real_idx].cpu().numpy().astype(np.uint8)
+
+        mask = self.preprocess_mask(mask)
+
+        if self.augmentation:
+            if random.random() < 0.35:
+                image, mask = self.random_rotation(image, mask)
+            if random.random() < 0.3:
+                image, mask = self.random_rescale(image, mask)
+            if random.random() < 0.3:
+                image, mask = self.random_shear(image, mask)
+            if random.random() < 0.4:
+                image = self.random_color_jitter(image)
+
+        image, mask = self.to_tensor(image, mask)
+        return image, mask
+
+
+images_pt = r"C:\colon\cvc-clinik\images.pt"
+masks_pt = r"C:\colon\cvc-clinik\masks.pt"
+
+all_images = torch.load(images_pt)
+all_masks = torch.load(masks_pt)
+
+if len(all_images) != len(all_masks):
+    raise ValueError("The number of images and masks in PT files must be the same.")
+
+all_indices = list(range(len(all_images)))
+train_indices, val_indices = train_test_split(all_indices, test_size=0.1, random_state=42)
+
+train_dataset = SegmentationDataset(images_pt, masks_pt, train_indices, augmentation=True)
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+
+val_dataset = SegmentationDataset(images_pt, masks_pt, val_indices, augmentation=False)
+val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
+
+print(f"تعداد نمونه‌های آموزش: {len(train_dataset)}")
+print(f"تعداد نمونه‌های اعتبارسنجی: {len(val_dataset)}")
+
+
+def show_samples(dataset, num_samples=2):
+    fig, axes = plt.subplots(num_samples, 2, figsize=(8, num_samples * 4))
+
+    if num_samples == 1:
+        axes = np.expand_dims(axes, axis=0)
+
+    for i in range(num_samples):
+        image, mask = dataset[i]
+        image_np = image.permute(1, 2, 0).numpy()
+        mask_np = mask.numpy()
+
+        axes[i, 0].imshow(image_np)
+        axes[i, 0].set_title("Image")
+        axes[i, 0].axis("off")
+
+        axes[i, 1].imshow(mask_np, cmap='gray')
+        axes[i, 1].set_title("Mask")
+        axes[i, 1].axis("off")
+
+    plt.tight_layout()
+    plt.show()
+
+
+print("نمونه‌های آموزش:")
+show_samples(train_dataset)
+
+print("نمونه‌های اعتبارسنجی:")
+show_samples(val_dataset)
